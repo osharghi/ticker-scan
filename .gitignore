@@ -1,0 +1,9 @@
+.venv/
+venv/
+.DS_Store
+__pycache__/
+*.pyc
+
+plan.md
+oldStuff/
+viewing-s3-data.md
