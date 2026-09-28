@@ -152,6 +152,7 @@ def run_morning_scan(tickers=None):
     df = df[df["tngoLast"] >= MIN_PRICE]
     if "volume" in df.columns:
         df = df[df["volume"].fillna(0) >= MIN_VOLUME]
+    df = df[df["pct_change_since_open"] > 0]
 
     top = df.sort_values("pct_change_since_open", ascending=False).head(TOP_N)
 
