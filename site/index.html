@@ -383,19 +383,40 @@ document.addEventListener("pointerover", (e) => {
 document.addEventListener("pointermove", (e) => {
   if (!tip.hidden && e.target.closest(".combo .s")) placeTip(e.clientX, e.clientY);
 });
+// Single place that undoes a hover, so every way a hover can end (pointer
+// leaving the line, scrolling, resizing) leaves the page in the same state.
+// It clears both halves of the hover: the tooltip, and the highlight (the
+// hovered line drawn bold, every other line faded). It clears the highlight
+// on *every* chart rather than just the hovered one, because when it's called
+// from scroll/resize there's no event target telling us which chart that was.
 function hideTip() {
   tip.hidden = true;
   document.querySelectorAll(".combo .s.on").forEach(el => el.classList.remove("on"));
   document.querySelectorAll(".combo.focus").forEach(el => el.classList.remove("focus"));
 }
+
+// Normal case: the pointer leaves a line. A line is several SVG elements
+// (path, points, wide invisible hit line, label), and moving between them
+// fires pointerout too -- relatedTarget is where the pointer went, so if it's
+// still inside the same line's group, the hover hasn't actually ended.
 document.addEventListener("pointerout", (e) => {
   const sEl = e.target.closest(".combo .s");
   if (!sEl || sEl.contains(e.relatedTarget)) return;
   hideTip();
 });
-// The tooltip is position:fixed, so scrolling would leave it floating over
-// unrelated content (the pointer doesn't move, so no pointerout fires).
+
+// The tooltip is position:fixed -- pinned to the window, not the chart -- so
+// it doesn't move when the page scrolls. And scrolling with a stationary
+// mouse slides the page under the pointer without firing any pointer events,
+// so the pointerout above never runs. Without this, the tooltip stays on
+// screen over whatever scrolls beneath it. Passive so it never delays
+// scrolling; the !tip.hidden check skips the DOM work on the (very frequent)
+// scroll events when nothing is showing.
 addEventListener("scroll", () => { if (!tip.hidden) hideTip(); }, { passive: true });
+
+// Resizing reflows the charts (they redraw to the new width), so the
+// tooltip's position and the highlighted line no longer match what's on
+// screen.
 addEventListener("resize", hideTip);
 // ---------- feed ----------
 function loadMore() {
