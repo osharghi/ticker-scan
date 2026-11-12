@@ -31,6 +31,10 @@ RECEIVER_EMAIL = os.environ.get("RECEIVER_EMAIL", SENDER_EMAIL)
 TIINGO_TOKEN = os.environ.get("TIINGO_API_TOKEN")
 STATE_BUCKET = os.environ.get("STATE_BUCKET")
 STATE_PREFIX = os.environ.get("STATE_PREFIX", "ticker-scan")
+# Public website bucket. Optional: when unset, nothing is published and the
+# job behaves exactly as before (email + private state snapshot only).
+SITE_BUCKET = os.environ.get("SITE_BUCKET")
+SITE_DATA_PREFIX = "data"
 
 TOP_N = int(os.environ.get("TOP_N", "10"))
 MIN_PRICE = float(os.environ.get("MIN_PRICE", "5"))
@@ -43,9 +47,68 @@ BATCH_SIZE = 150  # keep query strings well under URL length limits
 s3 = boto3.client("s3")
 
 
+def _today():
+    return datetime.datetime.now(MARKET_TZ).strftime("%Y-%m-%d")
+
+
 def _today_state_key():
-    today = datetime.datetime.now(MARKET_TZ).strftime("%Y-%m-%d")
-    return f"{STATE_PREFIX}/{today}.json"
+    return f"{STATE_PREFIX}/{_today()}.json"
+
+
+def _put_json(bucket, key, obj, cache_control=None):
+    extra = {"CacheControl": cache_control} if cache_control else {}
+    s3.put_object(
+        Bucket=bucket,
+        Key=key,
+        Body=json.dumps(obj).encode("utf-8"),
+        ContentType="application/json",
+        **extra,
+    )
+
+
+def publish_day_to_site(day):
+    """Write one day's results to the public site bucket and add the date to
+    the site's index of days.
+
+    `day` is the full document for that date (morning fields, plus afternoon
+    fields once the afternoon run has happened). Site copies are kept forever,
+    independent of the 30-day expiry on the private state snapshots.
+    """
+    if not SITE_BUCKET:
+        print("SITE_BUCKET not set; skipping website publish")
+        return
+
+    # Short cache so a refresh after a run shows the new data promptly.
+    _put_json(SITE_BUCKET, f"{SITE_DATA_PREFIX}/{day['date']}.json", day,
+              cache_control="max-age=60")
+
+    index_key = f"{SITE_DATA_PREFIX}/index.json"
+    try:
+        obj = s3.get_object(Bucket=SITE_BUCKET, Key=index_key)
+        dates = json.loads(obj["Body"].read()).get("dates", [])
+    except s3.exceptions.NoSuchKey:
+        dates = []
+    dates = sorted(set(dates) | {day["date"]}, reverse=True)
+    _put_json(SITE_BUCKET, index_key, {"dates": dates}, cache_control="max-age=60")
+    print(f"Published {day['date']} to s3://{SITE_BUCKET}/{SITE_DATA_PREFIX}/")
+
+
+def site_day_from_state(date, state):
+    """Build the public per-day document from a morning state snapshot."""
+    return {
+        "date": date,
+        "am_time": state["snapshot_time"],
+        "pm_time": None,
+        "tickers": [
+            {
+                "ticker": t["ticker"],
+                "open": t["open"],
+                "am_price": t["morning_price"],
+                "pm_price": None,
+            }
+            for t in state["tickers"]
+        ],
+    }
 
 
 def _get_with_retries(url, params, retries=4, backoff_seconds=2):
@@ -176,12 +239,7 @@ def run_morning_scan(tickers=None):
             for _, r in top.iterrows()
         ],
     }
-    s3.put_object(
-        Bucket=STATE_BUCKET,
-        Key=_today_state_key(),
-        Body=json.dumps(state).encode("utf-8"),
-        ContentType="application/json",
-    )
+    _put_json(STATE_BUCKET, _today_state_key(), state)
 
     rows = [
         {
@@ -196,6 +254,8 @@ def run_morning_scan(tickers=None):
         rows, ["Ticker", "Open", "Now", "Change since open"]
     )
     _send_email(f"Morning scan: top {len(rows)} movers since open", html)
+    # After the email, so a website problem never costs you the morning report.
+    publish_day_to_site(site_day_from_state(_today(), state))
     return {"statusCode": 200, "body": f"Scanned {len(df)} tickers, emailed top {len(rows)}"}
 
 
@@ -216,6 +276,7 @@ def run_afternoon_check():
     morning_tickers = state["tickers"]
     ticker_list = [t["ticker"] for t in morning_tickers]
     quotes_by_ticker = {q["ticker"]: q for q in fetch_quotes(ticker_list)}
+    pm_time = datetime.datetime.now(MARKET_TZ).isoformat()
 
     rows = []
     for t in morning_tickers:
@@ -243,6 +304,13 @@ def run_afternoon_check():
         rows, ["Ticker", "Open", "Morning price", "Now", "Change since morning email", "Change since open"]
     )
     _send_email("Afternoon check: how this morning's movers are doing", html)
+
+    day = site_day_from_state(_today(), state)
+    day["pm_time"] = pm_time
+    for t in day["tickers"]:
+        q = quotes_by_ticker.get(t["ticker"])
+        t["pm_price"] = q.get("tngoLast") if q else None
+    publish_day_to_site(day)
     return {"statusCode": 200, "body": f"Checked {len(rows)} tickers"}
 
 
