@@ -383,13 +383,20 @@ document.addEventListener("pointerover", (e) => {
 document.addEventListener("pointermove", (e) => {
   if (!tip.hidden && e.target.closest(".combo .s")) placeTip(e.clientX, e.clientY);
 });
+function hideTip() {
+  tip.hidden = true;
+  document.querySelectorAll(".combo .s.on").forEach(el => el.classList.remove("on"));
+  document.querySelectorAll(".combo.focus").forEach(el => el.classList.remove("focus"));
+}
 document.addEventListener("pointerout", (e) => {
   const sEl = e.target.closest(".combo .s");
   if (!sEl || sEl.contains(e.relatedTarget)) return;
-  sEl.classList.remove("on");
-  sEl.ownerSVGElement.classList.remove("focus");
-  tip.hidden = true;
+  hideTip();
 });
+// The tooltip is position:fixed, so scrolling would leave it floating over
+// unrelated content (the pointer doesn't move, so no pointerout fires).
+addEventListener("scroll", () => { if (!tip.hidden) hideTip(); }, { passive: true });
+addEventListener("resize", hideTip);
 // ---------- feed ----------
 function loadMore() {
   // One batch at a time; callers that arrive mid-batch wait on the same one.
